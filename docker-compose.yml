@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # FastAPI 应用服务
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-shopping-assistant
+    restart: unless-stopped  # 容器异常退出时自动重启
+
+    # 端口映射：宿主机端口:容器端口
+    ports:
+      - "8000:8000"
+
+    # 环境变量（从 .env 文件读取）
+    env_file:
+      - ./backend/.env
+
+    # 数据卷挂载（可选，方便开发时热更新代码）
+    # 生产环境可以注释掉，使用镜像内的代码
+    volumes:
+      - ./backend:/app/backend:ro  # ro = read-only 只读挂载
+      - app-logs:/app/logs  # 日志持久化
+
+    # 资源限制（2核4G的服务器，给应用分配合理资源）
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'      # 最多使用1.5核CPU
+          memory: 2G       # 最多使用2G内存
+        reservations:
+          cpus: '0.5'      # 保证至少0.5核
+          memory: 512M     # 保证至少512M内存
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    # 依赖服务（如果添加了 Redis/PostgreSQL）
+    # depends_on:
+    #   - redis
+    #   - postgres
+
+    # 网络配置
+    networks:
+      - app-network
+
+  # Redis 服务（用于缓存和会话存储）
+  redis:
+    image: redis:7-alpine
+    container_name: ai-shopping-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    # Redis 数据持久化
+    volumes:
+      - redis-data:/data
+
+    # Redis 配置
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-your_redis_password}
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+    networks:
+      - app-network
+
+  # PostgreSQL 数据库（用于存储对话历史等）
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-shopping-postgres
+    restart: unless-stopped
+
+    ports:
+      - "5432:5432"
+
+    # 环境变量
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_shopping}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-your_postgres_password}
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+
+    # 数据持久化
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # 如果有初始化脚本，可以挂载
+      # - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+    networks:
+      - app-network
+
+# 数据卷定义（持久化存储）
+volumes:
+  app-logs:
+    driver: local
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+
+# 网络定义
+networks:
+  app-network:
+    driver: bridge
