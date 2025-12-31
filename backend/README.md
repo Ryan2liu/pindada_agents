@@ -30,6 +30,9 @@ pip install -r ../requirements.txt
 
 已自动配置好 `.env` 文件，包含：
 - `DASHSCOPE_API_KEY`: 通义千问 API Key（已从环境变量导入）
+- `WECHAT_APPID`: 小程序 AppID
+- `WECHAT_SECRET`: 小程序 AppSecret
+- `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`: MySQL 配置
 
 ### 3. 启动服务
 
@@ -54,7 +57,37 @@ GET /
 GET /health
 ```
 
-### 2. AI 对话接口
+### 2. 微信登录接口
+
+```
+POST /auth/wechat/login
+```
+
+**请求体**:
+```json
+{
+  "code": "wx.login 获取的 code",
+  "profile": {
+    "nickName": "昵称",
+    "avatarUrl": "头像URL"
+  }
+}
+```
+
+**响应**:
+```json
+{
+  "token": "access_token",
+  "userId": 123,
+  "expiredAt": 1735560000000,
+  "profile": {
+    "nickName": "昵称",
+    "avatarUrl": "头像URL"
+  }
+}
+```
+
+### 3. AI 对话接口
 
 ```
 POST /chat
@@ -176,7 +209,7 @@ A: 可以切换到 `qwen-max` 模型，或调整 `temperature` 参数
 
 - [ ] 实现 Agent 工作流（LangGraph）
 - [ ] 添加商品数据库
-- [ ] 实现用户认证
+- [ ] 完善用户认证（refresh token / 鉴权中间件）
 - [ ] 对话历史持久化
 - [ ] 添加监控和日志
 

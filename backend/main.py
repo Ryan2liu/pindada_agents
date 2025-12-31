@@ -3,19 +3,40 @@ AI购物助手后端服务
 基于 FastAPI + 通义千问 API
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
+import uuid
+import json
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
+import httpx
+import pymysql
+from pymysql.cursors import DictCursor
 from openai import OpenAI
 from dotenv import load_dotenv
-import json
 import asyncio
 
 # 加载环境变量
 load_dotenv()
+
+# 数据库配置
+DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_NAME = os.getenv("DB_NAME", "ai_advisor")
+
+# 微信小程序配置
+WECHAT_APPID = os.getenv("WECHAT_APPID", "")
+WECHAT_SECRET = os.getenv("WECHAT_SECRET", "")
+
+ACCESS_TOKEN_EXPIRES_DAYS = int(os.getenv("ACCESS_TOKEN_EXPIRES_DAYS", "7"))
+REFRESH_TOKEN_EXPIRES_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRES_DAYS", "30"))
 
 # 初始化 FastAPI
 app = FastAPI(
@@ -55,6 +76,24 @@ class ChatResponse(BaseModel):
     response: str  # AI回复
     suggestions: Optional[List[str]] = []  # 建议的快捷回复
 
+class WechatProfile(BaseModel):
+    nickName: Optional[str] = None
+    avatarUrl: Optional[str] = None
+    gender: Optional[int] = None
+    country: Optional[str] = None
+    province: Optional[str] = None
+    city: Optional[str] = None
+    language: Optional[str] = None
+
+class WechatLoginRequest(BaseModel):
+    code: str
+    profile: Optional[WechatProfile] = None
+
+class WechatLoginResponse(BaseModel):
+    token: str
+    userId: int
+    expiredAt: int
+    profile: Optional[WechatProfile] = None
 
 # 系统提示词 - 定义AI助手的角色
 SYSTEM_PROMPT = """你是一个专业的礼物推荐顾问，名字叫"品答答"。你的任务是通过对话帮助用户找到最合适的礼物。
@@ -76,6 +115,174 @@ SYSTEM_PROMPT = """你是一个专业的礼物推荐顾问，名字叫"品答答
 请保持回复简洁（100字以内），不要过于冗长。"""
 
 
+def get_db_connection():
+    return pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        cursorclass=DictCursor,
+        charset="utf8mb4",
+        autocommit=True,
+    )
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def fetch_code2session(code: str) -> dict:
+    if not WECHAT_APPID or not WECHAT_SECRET:
+        raise HTTPException(status_code=500, detail="微信AppID或Secret未配置")
+
+    url = "https://api.weixin.qq.com/sns/jscode2session"
+    params = {
+        "appid": WECHAT_APPID,
+        "secret": WECHAT_SECRET,
+        "js_code": code,
+        "grant_type": "authorization_code",
+    }
+
+    async with httpx.AsyncClient(timeout=8.0) as client_http:
+        resp = await client_http.get(url, params=params)
+        data = resp.json()
+
+    if "errcode" in data and data.get("errcode") != 0:
+        raise HTTPException(status_code=400, detail=f"code2Session失败: {data}")
+
+    return data
+
+
+def get_or_create_user(openid: str, unionid: Optional[str], profile: Optional[WechatProfile], request: Request) -> int:
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT users.id AS user_id
+                FROM user_auths
+                JOIN users ON users.id = user_auths.user_id
+                WHERE user_auths.provider = %s AND user_auths.provider_user_id = %s
+                """,
+                ("wechat", openid),
+            )
+            row = cursor.fetchone()
+
+            if row:
+                user_id = row["user_id"]
+            else:
+                user_uuid = str(uuid.uuid4())
+                nickname = profile.nickName if profile else None
+                avatar = profile.avatarUrl if profile else None
+                profile_json = json.dumps(profile.dict(exclude_none=True)) if profile else None
+                cursor.execute(
+                    """
+                    INSERT INTO users (uuid, username, avatar, profile)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_uuid, nickname, avatar, profile_json),
+                )
+                user_id = cursor.lastrowid
+
+                cursor.execute(
+                    """
+                    INSERT INTO user_auths (user_id, provider, provider_user_id, verified)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_id, "wechat", openid, 1),
+                )
+
+            if profile:
+                cursor.execute(
+                    """
+                    UPDATE users
+                    SET username = COALESCE(%s, username),
+                        avatar = COALESCE(%s, avatar),
+                        profile = COALESCE(%s, profile)
+                    WHERE id = %s
+                    """,
+                    (
+                        profile.nickName,
+                        profile.avatarUrl,
+                        json.dumps(profile.dict(exclude_none=True)),
+                        user_id,
+                    ),
+                )
+
+            if unionid:
+                cursor.execute(
+                    """
+                    UPDATE user_auths
+                    SET provider_user_id = provider_user_id
+                    WHERE user_id = %s AND provider = %s
+                    """,
+                    (user_id, "wechat"),
+                )
+
+            cursor.execute(
+                """
+                UPDATE users
+                SET last_login_at = NOW(), last_login_ip = %s
+                WHERE id = %s
+                """,
+                (request.client.host if request.client else None, user_id),
+            )
+
+            return user_id
+    finally:
+        connection.close()
+
+
+def create_session(user_id: int, request: Request) -> dict:
+    access_token = secrets.token_urlsafe(32)
+    refresh_token = secrets.token_urlsafe(48)
+
+    access_hash = hash_token(access_token)
+    refresh_hash = hash_token(refresh_token)
+
+    now = datetime.now(timezone.utc)
+    refresh_expires_at = now + timedelta(days=REFRESH_TOKEN_EXPIRES_DAYS)
+    access_expires_at = now + timedelta(days=ACCESS_TOKEN_EXPIRES_DAYS)
+
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO user_sessions (
+                    user_id,
+                    device_id,
+                    platform,
+                    access_token_hash,
+                    refresh_token_hash,
+                    refresh_expires_at,
+                    last_active_at,
+                    last_ip,
+                    meta
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    None,
+                    "wechat",
+                    access_hash,
+                    refresh_hash,
+                    refresh_expires_at,
+                    now,
+                    request.client.host if request.client else None,
+                    json.dumps({"access_expires_at": int(access_expires_at.timestamp() * 1000)}),
+                ),
+            )
+
+        return {
+            "access_token": access_token,
+            "access_expires_at": int(access_expires_at.timestamp() * 1000),
+        }
+    finally:
+        connection.close()
+
 @app.get("/")
 async def root():
     """健康检查接口"""
@@ -84,6 +291,29 @@ async def root():
         "message": "AI购物助手后端服务运行中",
         "version": "1.0.0"
     }
+
+
+@app.post("/auth/wechat/login", response_model=WechatLoginResponse)
+async def wechat_login(payload: WechatLoginRequest, request: Request):
+    """
+    微信登录：使用 code 换取 openid，然后生成自定义登录态
+    """
+    data = await fetch_code2session(payload.code)
+    openid = data.get("openid")
+    unionid = data.get("unionid")
+
+    if not openid:
+        raise HTTPException(status_code=400, detail="未获取到openid")
+
+    user_id = get_or_create_user(openid, unionid, payload.profile, request)
+    session_data = create_session(user_id, request)
+
+    return WechatLoginResponse(
+        token=session_data["access_token"],
+        userId=user_id,
+        expiredAt=session_data["access_expires_at"],
+        profile=payload.profile
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)
