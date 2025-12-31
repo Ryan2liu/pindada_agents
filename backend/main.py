@@ -95,6 +95,10 @@ class WechatLoginResponse(BaseModel):
     expiredAt: int
     profile: Optional[WechatProfile] = None
 
+class UpdateProfileRequest(BaseModel):
+    nickName: Optional[str] = None
+    avatarUrl: Optional[str] = None
+
 # 系统提示词 - 定义AI助手的角色
 SYSTEM_PROMPT = """你是一个专业的礼物推荐顾问，名字叫"品答答"。你的任务是通过对话帮助用户找到最合适的礼物。
 
@@ -283,6 +287,43 @@ def create_session(user_id: int, request: Request) -> dict:
     finally:
         connection.close()
 
+
+def get_user_id_from_token(token: str) -> Optional[int]:
+    if not token:
+        return None
+    token_hash = hash_token(token)
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT user_id, refresh_expires_at, meta, revoked_at
+                FROM user_sessions
+                WHERE access_token_hash = %s
+                """,
+                (token_hash,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            if row.get("revoked_at"):
+                return None
+
+            meta = row.get("meta")
+            if meta:
+                try:
+                    meta_json = json.loads(meta)
+                    access_expires_at = meta_json.get("access_expires_at")
+                    if access_expires_at and int(access_expires_at) < int(datetime.now(timezone.utc).timestamp() * 1000):
+                        return None
+                except Exception:
+                    return None
+
+            return row.get("user_id")
+    finally:
+        connection.close()
+
 @app.get("/")
 async def root():
     """健康检查接口"""
@@ -314,6 +355,45 @@ async def wechat_login(payload: WechatLoginRequest, request: Request):
         expiredAt=session_data["access_expires_at"],
         profile=payload.profile
     )
+
+
+@app.post("/auth/profile")
+async def update_profile(payload: UpdateProfileRequest, request: Request):
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="缺少授权信息")
+
+    token = auth_header.replace("Bearer ", "").strip()
+    user_id = get_user_id_from_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="授权已失效")
+
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            profile_json = None
+            if payload.nickName or payload.avatarUrl:
+                profile_json = json.dumps(
+                    {
+                        "nickName": payload.nickName,
+                        "avatarUrl": payload.avatarUrl,
+                    },
+                    ensure_ascii=False,
+                )
+            cursor.execute(
+                """
+                UPDATE users
+                SET username = COALESCE(%s, username),
+                    avatar = COALESCE(%s, avatar),
+                    profile = COALESCE(%s, profile)
+                WHERE id = %s
+                """,
+                (payload.nickName, payload.avatarUrl, profile_json, user_id),
+            )
+
+        return {"status": "ok"}
+    finally:
+        connection.close()
 
 
 @app.post("/chat", response_model=ChatResponse)
