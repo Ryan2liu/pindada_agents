@@ -805,11 +805,12 @@ async def get_product_sections():
 @app.get("/products/{product_id}")
 async def get_product_detail(product_id: int):
     """
-    获取商品详情
+    获取商品详情（包含购买链接）
     """
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # 查询商品基本信息
             sql = """
                 SELECT
                     product_id as id,
@@ -829,6 +830,29 @@ async def get_product_detail(product_id: int):
 
             if not product:
                 raise HTTPException(status_code=404, detail="商品不存在")
+
+            # 查询该商品的所有购买链接（按平台分组）
+            link_sql = """
+                SELECT
+                    link_id,
+                    platform,
+                    original_url,
+                    affiliate_long_url,
+                    affiliate_short_url,
+                    conversion_status
+                FROM product_affiliate_links
+                WHERE product_id = %s AND conversion_status = 'success'
+                ORDER BY created_at DESC
+            """
+            cursor.execute(link_sql, (product_id,))
+            links = cursor.fetchall()
+
+            # 将链接添加到商品信息中
+            product['affiliate_links'] = links
+
+            # 如果有链接，设置默认购买链接为第一个成功的链接
+            product['buy_url'] = links[0]['affiliate_long_url'] if links else None
+            product['buy_platform'] = links[0]['platform'] if links else None
 
             return {
                 "success": True,
