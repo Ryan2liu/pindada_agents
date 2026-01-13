@@ -831,7 +831,7 @@ async def get_product_detail(product_id: int):
             if not product:
                 raise HTTPException(status_code=404, detail="商品不存在")
 
-            # 查询该商品的所有购买链接（按平台分组）
+            # 查询该商品的所有购买链接
             link_sql = """
                 SELECT
                     link_id,
@@ -847,12 +847,24 @@ async def get_product_detail(product_id: int):
             cursor.execute(link_sql, (product_id,))
             links = cursor.fetchall()
 
+            # 调试日志
+            print(f"[DEBUG] Product ID: {product_id}")
+            print(f"[DEBUG] Found {len(links)} links")
+            if links:
+                print(f"[DEBUG] First link: {links[0]}")
+
             # 将链接添加到商品信息中
             product['affiliate_links'] = links
 
             # 如果有链接，设置默认购买链接为第一个成功的链接
-            product['buy_url'] = links[0]['affiliate_long_url'] if links else None
-            product['buy_platform'] = links[0]['platform'] if links else None
+            if links and len(links) > 0:
+                product['buy_url'] = links[0].get('affiliate_long_url')
+                product['buy_platform'] = links[0].get('platform')
+                print(f"[DEBUG] Buy URL set to: {product['buy_url']}")
+            else:
+                product['buy_url'] = None
+                product['buy_platform'] = None
+                print(f"[DEBUG] No links found, buy_url is None")
 
             return {
                 "success": True,
@@ -862,6 +874,8 @@ async def get_product_detail(product_id: int):
         raise
     except Exception as e:
         print(f"Error fetching product detail: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"获取商品详情失败: {str(e)}")
     finally:
         connection.close()
