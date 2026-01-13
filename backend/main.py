@@ -99,6 +99,15 @@ class UpdateProfileRequest(BaseModel):
     nickName: Optional[str] = None
     avatarUrl: Optional[str] = None
 
+class ProductResponse(BaseModel):
+    """商品响应模型"""
+    id: int
+    name: str
+    image: Optional[str] = None
+    brand_id: Optional[int] = None
+    category_id: Optional[int] = None
+    description: Optional[str] = None
+
 # 系统提示词 - 定义AI助手的角色
 SYSTEM_PROMPT = """你是一个专业的礼物推荐顾问，名字叫"品答答"。你的任务是通过对话帮助用户找到最合适的礼物。
 
@@ -563,6 +572,275 @@ async def health_check():
         "model": "qwen-plus",
         "version": "1.0.0"
     }
+
+
+@app.get("/products")
+async def get_products(
+    page: int = 1,
+    limit: int = 20,
+    category_id: Optional[int] = None,
+    brand_id: Optional[int] = None
+):
+    """
+    获取商品列表（分页）
+
+    参数:
+    - page: 页码（从1开始）
+    - limit: 每页数量
+    - category_id: 分类ID筛选
+    - brand_id: 品牌ID筛选
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # 构建查询条件
+            where_clauses = ["status = 1"]  # 只查询上架的商品
+            params = []
+
+            if category_id:
+                where_clauses.append("category_id = %s")
+                params.append(category_id)
+
+            if brand_id:
+                where_clauses.append("brand_id = %s")
+                params.append(brand_id)
+
+            where_sql = " AND ".join(where_clauses)
+
+            # 查询总数
+            count_sql = f"SELECT COUNT(*) as total FROM products WHERE {where_sql}"
+            cursor.execute(count_sql, params)
+            total = cursor.fetchone()['total']
+
+            # 查询商品列表
+            offset = (page - 1) * limit
+            list_sql = f"""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id,
+                    description
+                FROM products
+                WHERE {where_sql}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            cursor.execute(list_sql, params + [limit, offset])
+            products = cursor.fetchall()
+
+            return {
+                "success": True,
+                "data": {
+                    "items": products,
+                    "total": total,
+                    "page": page,
+                    "limit": limit,
+                    "pages": (total + limit - 1) // limit
+                }
+            }
+    except Exception as e:
+        print(f"Error fetching products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取商品列表失败: {str(e)}")
+    finally:
+        connection.close()
+
+
+@app.get("/products/featured")
+async def get_featured_products(limit: int = 6):
+    """
+    获取精选商品（随机返回）
+
+    参数:
+    - limit: 返回数量（默认6个）
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sql = """
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id,
+                    description
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY RAND()
+                LIMIT %s
+            """
+            cursor.execute(sql, (limit,))
+            products = cursor.fetchall()
+
+            return {
+                "success": True,
+                "data": products
+            }
+    except Exception as e:
+        print(f"Error fetching featured products: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取精选商品失败: {str(e)}")
+    finally:
+        connection.close()
+
+
+@app.get("/products/sections")
+async def get_product_sections():
+    """
+    获取分组商品（用于发现页）
+    返回多个商品分组，每组8个商品
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sections = []
+
+            # 分组1: 最新商品（按创建时间倒序）
+            cursor.execute("""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY created_at DESC
+                LIMIT 8
+            """)
+            sections.append({
+                "id": "new",
+                "title": "最新上架",
+                "products": cursor.fetchall()
+            })
+
+            # 分组2: 随机推荐1
+            cursor.execute("""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY RAND()
+                LIMIT 8
+            """)
+            sections.append({
+                "id": "trending",
+                "title": "热门推荐",
+                "products": cursor.fetchall()
+            })
+
+            # 分组3: 随机推荐2
+            cursor.execute("""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY RAND()
+                LIMIT 8
+            """)
+            sections.append({
+                "id": "luxury",
+                "title": "精选好物",
+                "products": cursor.fetchall()
+            })
+
+            # 分组4: 随机推荐3
+            cursor.execute("""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY RAND()
+                LIMIT 8
+            """)
+            sections.append({
+                "id": "digital",
+                "title": "数码科技",
+                "products": cursor.fetchall()
+            })
+
+            # 分组5: 随机推荐4
+            cursor.execute("""
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id
+                FROM products
+                WHERE status = 1 AND main_image_url IS NOT NULL AND main_image_url != ''
+                ORDER BY RAND()
+                LIMIT 8
+            """)
+            sections.append({
+                "id": "beauty",
+                "title": "美妆护肤",
+                "products": cursor.fetchall()
+            })
+
+            return {
+                "success": True,
+                "data": sections
+            }
+    except Exception as e:
+        print(f"Error fetching product sections: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取商品分组失败: {str(e)}")
+    finally:
+        connection.close()
+
+
+@app.get("/products/{product_id}")
+async def get_product_detail(product_id: int):
+    """
+    获取商品详情
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sql = """
+                SELECT
+                    product_id as id,
+                    spu_name as name,
+                    main_image_url as image,
+                    brand_id,
+                    category_id,
+                    description,
+                    model_number,
+                    launch_date,
+                    status
+                FROM products
+                WHERE product_id = %s
+            """
+            cursor.execute(sql, (product_id,))
+            product = cursor.fetchone()
+
+            if not product:
+                raise HTTPException(status_code=404, detail="商品不存在")
+
+            return {
+                "success": True,
+                "data": product
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching product detail: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取商品详情失败: {str(e)}")
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":
