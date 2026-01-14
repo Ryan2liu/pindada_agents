@@ -810,20 +810,22 @@ async def get_product_detail(product_id: int):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 查询商品基本信息
+            # 查询商品基本信息（包含品牌名称）
             sql = """
                 SELECT
-                    product_id as id,
-                    spu_name as name,
-                    main_image_url as image,
-                    brand_id,
-                    category_id,
-                    description,
-                    model_number,
-                    launch_date,
-                    status
-                FROM products
-                WHERE product_id = %s
+                    p.product_id as id,
+                    p.spu_name as name,
+                    p.main_image_url as image,
+                    p.brand_id,
+                    b.brand_name_zh as brand,
+                    p.category_id,
+                    p.description,
+                    p.model_number,
+                    p.launch_date,
+                    p.status
+                FROM products p
+                LEFT JOIN brands b ON p.brand_id = b.brand_id
+                WHERE p.product_id = %s
             """
             cursor.execute(sql, (product_id,))
             product = cursor.fetchone()
