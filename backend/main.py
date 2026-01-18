@@ -616,15 +616,17 @@ async def get_products(
             offset = (page - 1) * limit
             list_sql = f"""
                 SELECT
-                    product_id as id,
-                    spu_name as name,
-                    main_image_url as image,
-                    brand_id,
-                    category_id,
-                    description
-                FROM products
+                    p.product_id as id,
+                    p.spu_name as name,
+                    p.main_image_url as image,
+                    p.brand_id,
+                    b.brand_name_zh as brand,
+                    p.category_id,
+                    p.description
+                FROM products p
+                LEFT JOIN brands b ON p.brand_id = b.brand_id
                 WHERE {where_sql}
-                ORDER BY created_at DESC
+                ORDER BY p.created_at DESC
                 LIMIT %s OFFSET %s
             """
             cursor.execute(list_sql, params + [limit, offset])
